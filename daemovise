@@ -39,8 +39,8 @@ pod2usage(-verbose => 99, -sections => 'USAGE|EXAMPLES|OPTIONS')
 pod2usage(-verbose => 2) if $config{man};
 
 # Script implementation here
-$config{stderr} = $config{stdout} = $config{allouts}
-  if exists $config{allouts};
+$config{stderr} = $config{stdout} = $config{outputs}
+  if exists $config{outputs};
 
 # daemonize
 isolate();
