@@ -181,7 +181,7 @@ sub supervise {
 
 sub myexit {
    my ($message, $exit_code) = @_;
-   warn "$message\n";
+   WARN "$message";
    unlink $config{pidfile} if exists $config{pidfile};
    exit $exit_code;
 }
@@ -194,7 +194,7 @@ sub mysystem {
       return $pid;
    }
 
-   warn "Starting: $command @args\n";
+   WARN "Starting: $command @args";
    { exec {$command} $command, @args } # disable warning
    kill 'ABRT', $parent_pid;
    exit 1;
