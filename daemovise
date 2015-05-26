@@ -12,8 +12,10 @@ use File::Basename qw< dirname >;
 
 my %config = (
    append => 1,
+   exit_code => 100,
    stderr => '/dev/null',
    stdout => '/dev/null',
+   throttle => 1,
    timeout => undef,
    umask  => '077',
 );
@@ -23,10 +25,12 @@ GetOptions(
      usage! help! man! version!
      append!
      dir|d=s
+     exit_code|exit-code|c=i
      outputs|O=s
      pidfile|p=s
      stderr|err|e=s
      stdout|out|o=s
+     throttle|T=s
      timeout|t=i
      umask|u=s
      >
@@ -134,16 +138,34 @@ sub supervise {
       kill 'KILL', $pid;
    };
 
+   my $aborted;
+   local $SIG{ABRT} = sub {
+      $exit = $aborted = 1;
+   };
+
    my $epid;
    while (! $exit) {
+      my $start = time();
       $pid = mysystem(@ARGV)
          if (! defined $pid) || ($pid eq $epid);
       $epid = wait();
+
+      if ($epid == $pid) {
+         my $exit_code = $CHILD_ERROR >> 8;
+         myexit("child exited with code $config{exit_code}, exiting", 0)
+            if $exit_code == $config{exit_code};
+      }
+
+      my $execution_time = time() - $start;
+      my $sleep_time = $config{throttle} - $execution_time;
+      sleep $sleep_time if $sleep_time > 0;
    }
 
-   myexit('child terminated normally, exiting', 0)
-      if ($pid == $epid) && (! $killed);
+   myexit('could not exec in child, aborting', 1)
+      if $aborted;
    myexit('child terminated after hard kill, exiting', 1)
+      if $killed;
+   myexit('child terminated normally, exiting', 0)
       if $pid == $epid;
    myexit('child did not terminate, exiting', 2);
 }
@@ -157,14 +179,16 @@ sub myexit {
 
 sub mysystem {
    my ($command, @args) = @_;
+
+   my $parent_pid = $PID;
    if (my $pid = myfork()) {
       return $pid;
    }
 
    warn "Starting: $command @args\n";
-   exec {$command} $command, @args
-      or die "exec(): $OS_ERROR\n";
-   return; # never reached
+   { exec {$command} $command, @args } # disable warning
+   kill 'ABRT', $parent_pid;
+   exit 1;
 }
 
 sub myfork {
@@ -192,10 +216,12 @@ Ask the version number to the script itself, calling:
 
    daemovise [--append|--no-append]
              [--dir|-d directory]
+             [--exit-code|-c code]
              [--outputs|O filename]
              [--pidfile|-p filename]
              [--stderr|--err|-e filename]
              [--stdout|--out|-o filename]
+             [--throttle|-T time]
              [--timeout|-t timeout]
              [--umask|-u umask]
              [--] command [arg [arg...]]
@@ -281,6 +307,14 @@ mode. If you want to create a new file instead, pass C<--no-append>.
 set the directory where to C<chdir> before starting all operations. All
 relative paths are meant to be referred to this directory.
 
+=item --exit-code | -c code
+
+set a special I<exit code> that, when used by the child, will make the
+supervision stop. This allows deciding when to stop the execution from
+within the child.
+
+By default it is set to 100.
+
 =item --help
 
 print a somewhat more verbose help, showing usage, this description of
@@ -308,6 +342,14 @@ daemovise in a later stage.
 set the name for respectively the stderr and stdout channels. If set to
 the same value (e.g. via C<--outputs>) only the new stdout will be opened,
 and stderr will be duplicated.
+
+=item --throttle | -T time
+
+throttle child re-spawning by C<time> seconds. In this way, you can avoid
+re-spawning a child too fast if there are errors that prevent the child
+from executing successfully (e.g. misconfigurations).
+
+Defaults to 1.
 
 =item --timeout | -t timeout
 
