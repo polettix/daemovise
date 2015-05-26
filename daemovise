@@ -1,0 +1,325 @@
+#!/usr/bin/env perl
+use strict;
+use warnings;
+use Carp;
+use Pod::Usage qw< pod2usage >;
+use Getopt::Long qw< :config gnu_getopt >;
+use English qw< -no_match_vars >;
+my $VERSION = '0.0.1';
+use 5.012;
+use POSIX ();
+use Cwd qw< realpath >;
+use File::Basename qw< dirname >;
+
+my %config = (
+   alarm => 10,
+   append => 1,
+   stderr => '/dev/null',
+   stdout => '/dev/null',
+   umask  => '077',
+);
+GetOptions(
+   \%config,
+   qw<
+     usage! help! man! version!
+     alarm=i
+     append!
+     dir|d=s
+     allouts|E=s
+     pidfile=s
+     stderr|err|e=s
+     stdout|out|o=s
+     umask=s
+     >
+) or pod2usage(-verbose => 99, -sections => 'USAGE');
+pod2usage(message => "$0 $VERSION", -verbose => 99, -sections => ' ')
+  if $config{version};
+pod2usage(-verbose => 99, -sections => 'USAGE') if $config{usage};
+pod2usage(-verbose => 99, -sections => 'USAGE|EXAMPLES|OPTIONS')
+  if $config{help};
+pod2usage(-verbose => 2) if $config{man};
+
+# Script implementation here
+$config{stderr} = $config{stdout} = $config{allouts}
+  if exists $config{allouts};
+
+$config{dir} = dirname(realpath($ARGV[0]))
+  unless exists $config{dir};
+
+# daemonize
+isolate();
+save_pidfile();
+initialize_filehandles();
+
+# supervise
+supervise();
+
+# never reached really
+exit 0;
+
+sub isolate {
+   # get into target directory
+   chdir $config{dir}
+   or die "chdir(): $OS_ERROR\n";
+
+   # (re)set umask
+   umask oct($config{umask})
+   or die "umask(): $OS_ERROR\n";
+
+   $SIG{HUP} = 'IGNORE';
+   exit if myfork();
+
+   # Intermediate child becomes session leader. This will detach from TTY
+   POSIX::setsid();
+
+   # Now fork() again so that we're no session leader any more. There will
+   # be no means to get the TTY again now
+   exit if myfork();
+}
+
+sub save_pidfile {
+   if (exists $config{pidfile}) {
+      open my $fh, '>', $config{pidfile}
+         or die "open('$config{pidfile}'): $OS_ERROR\n";
+      print {$fh} $PID or die "print(): $OS_ERROR\n";
+      close $fh or die "close(): $OS_ERROR\n";
+   }
+}
+
+sub initialize_filehandles {
+   my $max = POSIX::sysconf(&POSIX::_SC_OPEN_MAX) // 64;
+   $max = 64 if $max < 0;
+   POSIX::close($_) for 3 .. $max;
+
+   close STDIN;
+   open STDIN, '<', '/dev/null'
+   or die "open(): $OS_ERROR\n";
+
+   reopen_outputs();
+}
+
+sub reopen_outputs {
+   my $mode = $config{append} ? '>>' : '>';
+
+   close STDOUT;
+   open STDOUT, $mode, $config{stdout}
+   or die "open(): $OS_ERROR\n";
+
+   close STDERR;
+   if ($config{stderr} eq $config{stdout}) {
+      open STDERR, '>&', \*STDOUT
+         or die '';
+   }
+   else {
+      open STDERR, $mode, $config{stderr}
+         or die '';
+   }
+}
+
+sub supervise {
+   my $pid;
+   local $SIG{HUP} = sub {
+      kill 'HUP', $pid;
+      reopen_outputs();
+   };
+
+   my $exit;
+   local $SIG{TERM} = sub {
+      $exit = 1;
+      kill 'TERM', $pid;
+      alarm $config{alarm};
+   };
+
+   my $killed;
+   local $SIG{ALRM} = sub {
+      $killed = 1;
+      kill 'KILL', $pid;
+   };
+
+   my $epid;
+   while (! $exit) {
+      $pid = mysystem(@ARGV)
+         if (! defined $pid) || ($pid eq $epid);
+      $epid = wait();
+   }
+
+   myexit('child terminated normally, exiting', 0)
+      if ($pid == $epid) && (! $killed);
+   myexit('child terminated after hard kill, exiting', 1)
+      if $pid == $epid;
+   myexit('child did not terminate, exiting', 2);
+}
+
+sub myexit {
+   my ($message, $exit_code) = @_;
+   warn "$message\n";
+   unlink $config{pidfile} if exists $config{pidfile};
+   exit $exit_code;
+}
+
+sub mysystem {
+   my ($command, @args) = @_;
+   if (my $pid = myfork()) {
+      return $pid;
+   }
+
+   warn "Starting: $command @args\n";
+   exec {$command} $command, @args
+      or die "exec(): $OS_ERROR\n";
+   return; # never reached
+}
+
+sub myfork {
+   defined(my $child = fork())
+      or die "fork(): $OS_ERROR\n";
+   return $child;
+}
+
+__END__
+
+=head1 NAME
+
+daemovise - [ una breve descrizione del programma ]
+
+=head1 VERSION
+
+Ask the version number to the script itself, calling:
+
+   shell$ daemovise --version
+
+
+=head1 USAGE
+
+   daemovise [--usage] [--help] [--man] [--version]
+
+   daemovise
+
+=head1 EXAMPLES
+
+   shell$ daemovise
+
+=for l'autore, da riempire:
+   Qualche breve esempio con codice che mostri l'utilizzo più comune.
+   Questa sezione sarà quella probabilmente più letta, perché molti
+   utenti si annoiano a leggere tutta la documentazione, per cui
+   è meglio essere il più educativi ed esplicativi possibile.
+
+
+=head1 DESCRIPTION
+
+=for l'autore, da riempire:
+   Fornite una descrizione completa del modulo e delle sue caratteristiche.
+   Aiutatevi a strutturare il testo con le sottosezioni (=head2, =head3)
+   se necessario.
+
+
+=head1 OPTIONS
+
+=for l'autore, da riempire:
+   Una descrizione di tutte le opzioni possibili nella chiamata allo script
+
+=over
+
+=item --help
+
+print a somewhat more verbose help, showing usage, this description of
+the options and some examples from the synopsis.
+
+=item --man
+
+print out the full documentation for the script.
+
+=item --usage
+
+print a concise usage line and exit.
+
+=item --version
+
+print the version of the script.
+
+=back
+
+=head1 DIAGNOSTICS
+
+=for l'autore, da riempire:
+   Elencate qualunque singolo errore o messaggio di avvertimento che
+   lo script può generare, anche quelli che non "accadranno mai".
+   Includete anche una spiegazione completa di ciascuno di questi
+   problemi, una o più possibili cause e qualunque rimedio
+   suggerito.
+
+
+=over
+
+=item C<< Error message here, perhaps with %s placeholders >>
+
+[Descrizione di un errore]
+
+=item C<< Another error message here >>
+
+[Descrizione di un errore]
+
+[E così via...]
+
+=back
+
+
+=head1 CONFIGURATION AND ENVIRONMENT
+
+=for l'autore, da riempire:
+   Una spiegazione completa di qualunque sistema di configurazione
+   utilizzato dallo script, inclusi i nomi e le posizioni dei file di
+   configurazione, il significato di ciascuna variabile di ambiente
+   utilizzata e proprietà che può essere impostata. Queste descrizioni
+   devono anche includere dettagli su eventuali linguaggi di configurazione
+   utilizzati.
+  
+daemovise requires no configuration files or environment variables.
+
+
+=head1 DEPENDENCIES
+
+=for l'autore, da riempire:
+   Una lista di tutti i moduli su cui si basa questo script,
+   incluse eventuali restrizioni sulle relative versioni, ed una
+   indicazione se il modulo in questione è parte della distribuzione
+   standard di Perl, parte della distribuzione del modulo o se
+   deve essere installato separatamente.
+
+None.
+
+
+=head1 BUGS AND LIMITATIONS
+
+=for l'autore, da riempire:
+   Una lista di tutti i problemi conosciuti relativi al modulo,
+   insime a qualche indicazione sul fatto che tali problemi siano
+   plausibilmente risolti in una versione successiva. Includete anche
+   una lista delle restrizioni sulle funzionalità fornite dal
+   modulo: tipi di dati che non si è in grado di gestire, problematiche
+   relative all'efficienza e le circostanze nelle quali queste possono
+   sorgere, limitazioni pratiche sugli insiemi dei dati, casi
+   particolari che non sono (ancora) gestiti, e così via.
+
+No bugs have been reported.
+
+Please report any bugs or feature requests through http://rt.cpan.org/
+
+
+=head1 AUTHOR
+
+Flavio Poletti C<polettix@cpan.org>
+
+
+=head1 LICENCE AND COPYRIGHT
+
+Copyright (c) 2015, Flavio Poletti C<polettix@cpan.org>.
+
+This module is free software.  You can redistribute it and/or
+modify it under the terms of the Artistic License 2.0.
+
+This program is distributed in the hope that it will be useful,
+but without any warranty; without even the implied warranty of
+merchantability or fitness for a particular purpose.
+
+=cut
