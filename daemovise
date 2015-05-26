@@ -9,9 +9,13 @@ use POSIX ();
 use Cwd qw< realpath >;
 use File::Basename qw< dirname >;
 
+use Log::Log4perl::Tiny qw< :easy LOGLEVEL get_logger >;
+Log::Log4perl->easy_init({ level => $INFO });
+
 my %config = (
    append => 1,
    exit_code => 100,
+   loglevel => 'INFO',
    stderr => '/dev/null',
    stdout => '/dev/null',
    throttle => 1,
@@ -25,6 +29,7 @@ GetOptions(
      append!
      dir|d=s
      exit_code|exit-code|c=i
+     loglevel|log|l=s
      outputs|O=s
      pidfile|p=s
      stderr|err|e=s
@@ -42,6 +47,7 @@ pod2usage(-verbose => 99, -sections => 'USAGE|EXAMPLES|OPTIONS')
 pod2usage(-verbose => 2) if $config{man};
 
 # Script implementation here
+LOGLEVEL($config{loglevel});
 $config{stderr} = $config{stdout} = $config{outputs}
   if exists $config{outputs};
 
@@ -60,12 +66,12 @@ sub isolate {
    # get into target directory
    if (exists $config{dir}) {
       chdir $config{dir}
-         or die "chdir(): $OS_ERROR\n";
+         or LOGDIE "chdir(): $OS_ERROR";
    }
 
    # (re)set umask
    umask oct($config{umask})
-   or die "umask(): $OS_ERROR\n";
+      or LOGDIE "umask(): $OS_ERROR";
 
    $SIG{HUP} = 'IGNORE';
    exit if myfork();
@@ -81,9 +87,9 @@ sub isolate {
 sub save_pidfile {
    if (exists $config{pidfile}) {
       open my $fh, '>', $config{pidfile}
-         or die "open('$config{pidfile}'): $OS_ERROR\n";
-      print {$fh} $PID or die "print(): $OS_ERROR\n";
-      close $fh or die "close(): $OS_ERROR\n";
+         or LOGDIE "open('$config{pidfile}'): $OS_ERROR";
+      print {$fh} $PID or LOGDIE "print(): $OS_ERROR";
+      close $fh or LOGDIE "close(): $OS_ERROR";
    }
 }
 
@@ -94,7 +100,7 @@ sub initialize_filehandles {
 
    close STDIN;
    open STDIN, '<', '/dev/null'
-   or die "open(): $OS_ERROR\n";
+      or LOGDIE "open(): $OS_ERROR\n";
 
    reopen_outputs();
 }
@@ -104,8 +110,9 @@ sub reopen_outputs {
 
    close STDOUT;
    open STDOUT, $mode, $config{stdout}
-   or die "open(): $OS_ERROR\n";
+      or LOGDIE "open(): $OS_ERROR\n";
 
+   # die()-ing after STDERR has been closed does not carry any message
    close STDERR;
    if ($config{stderr} eq $config{stdout}) {
       open STDERR, '>&', \*STDOUT
@@ -115,6 +122,9 @@ sub reopen_outputs {
       open STDERR, $mode, $config{stderr}
          or die '';
    }
+
+   # now stderr has been reset... ensure the logger knows it
+   get_logger()->fh(\*STDERR);
 }
 
 sub supervise {
@@ -192,7 +202,7 @@ sub mysystem {
 
 sub myfork {
    defined(my $child = fork())
-      or die "fork(): $OS_ERROR\n";
+      or LOGDIE "fork(): $OS_ERROR\n";
    return $child;
 }
 
