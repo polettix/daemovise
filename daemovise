@@ -6,30 +6,29 @@ use Pod::Usage qw< pod2usage >;
 use Getopt::Long qw< :config gnu_getopt >;
 use English qw< -no_match_vars >;
 my $VERSION = '0.0.1';
-use 5.012;
 use POSIX ();
 use Cwd qw< realpath >;
 use File::Basename qw< dirname >;
 
 my %config = (
-   alarm => 10,
    append => 1,
    stderr => '/dev/null',
    stdout => '/dev/null',
+   timeout => undef,
    umask  => '077',
 );
 GetOptions(
    \%config,
    qw<
      usage! help! man! version!
-     alarm=i
      append!
      dir|d=s
-     allouts|E=s
-     pidfile=s
+     outputs|O=s
+     pidfile|p=s
      stderr|err|e=s
      stdout|out|o=s
-     umask=s
+     timeout|t=i
+     umask|u=s
      >
 ) or pod2usage(-verbose => 99, -sections => 'USAGE');
 pod2usage(message => "$0 $VERSION", -verbose => 99, -sections => ' ')
@@ -42,9 +41,6 @@ pod2usage(-verbose => 2) if $config{man};
 # Script implementation here
 $config{stderr} = $config{stdout} = $config{allouts}
   if exists $config{allouts};
-
-$config{dir} = dirname(realpath($ARGV[0]))
-  unless exists $config{dir};
 
 # daemonize
 isolate();
@@ -59,8 +55,10 @@ exit 0;
 
 sub isolate {
    # get into target directory
-   chdir $config{dir}
-   or die "chdir(): $OS_ERROR\n";
+   if (exists $config{dir}) {
+      chdir $config{dir}
+         or die "chdir(): $OS_ERROR\n";
+   }
 
    # (re)set umask
    umask oct($config{umask})
@@ -87,7 +85,7 @@ sub save_pidfile {
 }
 
 sub initialize_filehandles {
-   my $max = POSIX::sysconf(&POSIX::_SC_OPEN_MAX) // 64;
+   my $max = POSIX::sysconf(&POSIX::_SC_OPEN_MAX) || 64;
    $max = 64 if $max < 0;
    POSIX::close($_) for 3 .. $max;
 
@@ -127,7 +125,7 @@ sub supervise {
    local $SIG{TERM} = sub {
       $exit = 1;
       kill 'TERM', $pid;
-      alarm $config{alarm};
+      alarm $config{timeout} if $config{timeout};
    };
 
    my $killed;
@@ -179,7 +177,7 @@ __END__
 
 =head1 NAME
 
-daemovise - [ una breve descrizione del programma ]
+daemovise - supervise from a daemon
 
 =head1 VERSION
 
@@ -192,33 +190,96 @@ Ask the version number to the script itself, calling:
 
    daemovise [--usage] [--help] [--man] [--version]
 
-   daemovise
+   daemovise [--append|--no-append]
+             [--dir|-d directory]
+             [--outputs|O filename]
+             [--pidfile|-p filename]
+             [--stderr|--err|-e filename]
+             [--stdout|--out|-o filename]
+             [--timeout|-t timeout]
+             [--umask|-u umask]
+             [--] command [arg [arg...]]
 
 =head1 EXAMPLES
 
-   shell$ daemovise
+   # write both stdout and stderr in sample.log
+   # save PID in sample.pid for later reuse (sending commands)
+   # set a timeout of 10 seconds for child to honor a TERM request
+   shell$ daemovise -O sample.log -p sample.pid ./sample.sh -t 10
+   
+   # send HUP, this makes it possible to e.g. rotate logs.
+   # HUP signal is propagated down to child, if it does not handle it
+   # then it will exit and will be restarted by daemovise
+   shell$ mv sample.log sample.log.1
+   shell$ kill -HUP $(<sample.pid)
 
-=for l'autore, da riempire:
-   Qualche breve esempio con codice che mostri l'utilizzo più comune.
-   Questa sezione sarà quella probabilmente più letta, perché molti
-   utenti si annoiano a leggere tutta la documentazione, per cui
-   è meglio essere il più educativi ed esplicativi possibile.
-
+   # send TERM and then KILL after the timeout
+   shell$ kill $(<sample.pid)
 
 =head1 DESCRIPTION
 
-=for l'autore, da riempire:
-   Fornite una descrizione completa del modulo e delle sue caratteristiche.
-   Aiutatevi a strutturare il testo con le sottosezioni (=head2, =head3)
-   se necessario.
+This program starts as a daemon and takes care to supervise the execution
+of a child program.
+
+When starting, daemovise will generate a daemon with the following
+characteristics:
+
+=over
+
+=item *
+
+change directory in what configured for C<--dir> (if this is not set,
+this step is skipped)
+
+=item *
+
+reset the C<umask> to whatever set via C<--umask> (that is C<077> by
+default)
+
+=item *
+
+C<fork()> twice with C<POSIX::setsid()> in between, so that the process
+is properly detached from the TTY and will not be able to gain control
+of a TTY again
+
+=item *
+
+close all filehandles, then reopen stdin to read from C</dev/null> and
+stdout/stderr to write to whatever configured (see options
+C<--stdout>, C<--stderr> and C<--outputs>)
+
+=back
+
+After starting as a daemon as described above, daemovise repeatedly
+runs the child program provided on the command line until an exit
+condition is triggered.
+
+It is possible to definitely terminate the process (both daemovise and
+the child in current execution) by sending a TERM signal to daemovise. In
+this case, daemovise will first send the TERM signal, then if a timeout is
+set it will send a KILL signal if the child did not terminate after the
+timeout itself.
+
+It is also possible to send the HUP signal to daemovise. This signal will
+be forwarded to the child too (this usually means that the child will
+exit, unless the signal is properly trapped) and the output channels will
+be reopened too. This makes it possible to use e.g. C<logrotate> in order
+to avoid log files filling up the whole filesystem.
 
 
 =head1 OPTIONS
 
-=for l'autore, da riempire:
-   Una descrizione di tutte le opzioni possibili nella chiamata allo script
-
 =over
+
+=item --append | --no-append
+
+by default, output files for stdout and stderr are opened in append
+mode. If you want to create a new file instead, pass C<--no-append>.
+
+=item --dir | -d directory
+
+set the directory where to C<chdir> before starting all operations. All
+relative paths are meant to be referred to this directory.
 
 =item --help
 
@@ -228,6 +289,35 @@ the options and some examples from the synopsis.
 =item --man
 
 print out the full documentation for the script.
+
+=item --outputs | -O filename
+
+set an output filename for both stdout and stderr. This option overrides
+whatever is set for C<--stdout> and C<--stderr>.
+
+=item --pidfile | -p filename
+
+save the process identifier (PID) of the daemovise process in the
+specified filename. This will make it easier to interact with
+daemovise in a later stage.
+
+=item --stderr | --err | -e filename
+
+=item --stdout | --out | -o filename
+
+set the name for respectively the stderr and stdout channels. If set to
+the same value (e.g. via C<--outputs>) only the new stdout will be opened,
+and stderr will be duplicated.
+
+=item --timeout | -t timeout
+
+set a timeout for the child to honor the C<TERM> signal. If the child does
+not exit within the timeout, a C<KILL> signal will be sent.
+
+=item --umask | -u umask
+
+set the new C<umask> for file creation. By default it is C<077>, i.e. files
+are created by default to be read/written/executed by the owner only.
 
 =item --usage
 
@@ -239,67 +329,27 @@ print the version of the script.
 
 =back
 
+Considering that the executed child program might have its own options too,
+it is suggested to always terminate the command line options for daemovise
+with C<-->, so that the options analyzer will stop interpreting further
+in the command line.
+
+
 =head1 DIAGNOSTICS
 
-=for l'autore, da riempire:
-   Elencate qualunque singolo errore o messaggio di avvertimento che
-   lo script può generare, anche quelli che non "accadranno mai".
-   Includete anche una spiegazione completa di ciascuno di questi
-   problemi, una o più possibili cause e qualunque rimedio
-   suggerito.
-
-
-=over
-
-=item C<< Error message here, perhaps with %s placeholders >>
-
-[Descrizione di un errore]
-
-=item C<< Another error message here >>
-
-[Descrizione di un errore]
-
-[E così via...]
-
-=back
-
+Whatever operation that fails is usually fatal.
 
 =head1 CONFIGURATION AND ENVIRONMENT
 
-=for l'autore, da riempire:
-   Una spiegazione completa di qualunque sistema di configurazione
-   utilizzato dallo script, inclusi i nomi e le posizioni dei file di
-   configurazione, il significato di ciascuna variabile di ambiente
-   utilizzata e proprietà che può essere impostata. Queste descrizioni
-   devono anche includere dettagli su eventuali linguaggi di configurazione
-   utilizzati.
-  
 daemovise requires no configuration files or environment variables.
 
 
 =head1 DEPENDENCIES
 
-=for l'autore, da riempire:
-   Una lista di tutti i moduli su cui si basa questo script,
-   incluse eventuali restrizioni sulle relative versioni, ed una
-   indicazione se il modulo in questione è parte della distribuzione
-   standard di Perl, parte della distribuzione del modulo o se
-   deve essere installato separatamente.
-
 None.
 
 
 =head1 BUGS AND LIMITATIONS
-
-=for l'autore, da riempire:
-   Una lista di tutti i problemi conosciuti relativi al modulo,
-   insime a qualche indicazione sul fatto che tali problemi siano
-   plausibilmente risolti in una versione successiva. Includete anche
-   una lista delle restrizioni sulle funzionalità fornite dal
-   modulo: tipi di dati che non si è in grado di gestire, problematiche
-   relative all'efficienza e le circostanze nelle quali queste possono
-   sorgere, limitazioni pratiche sugli insiemi dei dati, casi
-   particolari che non sono (ancora) gestiti, e così via.
 
 No bugs have been reported.
 
